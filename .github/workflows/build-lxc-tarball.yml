@@ -8,12 +8,20 @@ on:
         required: false
         default: "master"
         type: string
+      crowdsec_version:
+        description: "钉住 crowdsec 版本（如 1.8.1，可留空=packagecloud 最新）；填了就会强校验，对不上直接失败"
+        required: false
+        default: ""
+        type: string
+  schedule:
+    # 每周一 03:17 UTC（北京 11:17）自动滚一次最新版；钉版本请手动 dispatch
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: write
 
 concurrency:
-  group: lxc-tarball-${{ github.event.inputs.source_ref }}
+  group: lxc-tarball
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: xiealon/ImmortalWrt-ImageBuilder
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ inputs.source_ref || 'master' }}
           path: src
           fetch-depth: 0
 
@@ -33,13 +41,25 @@ jobs:
         run: |
           set -eux
           cd src
-          echo "source_repo=xiealon/ImmortalWrt-ImageBuilder"
-          echo "source_ref=${{ inputs.source_ref }}"
+          echo "source_ref=${{ inputs.source_ref || 'master' }}"
           echo "source_sha=$(git rev-parse HEAD)"
+          echo "crowdsec_version_requested=${CS_VERSION_REQ:-<empty=latest>}"
           echo "--- rootfs-skel/etc/crowdsec-net.conf ---"
           cat rootfs-skel/etc/crowdsec-net.conf
-          echo "--- prepare 脚本头 ---"
-          sed -n '1,40p' shell/prepare-crowdsec-minimal.sh
+        env:
+          CS_VERSION_REQ: ${{ inputs.crowdsec_version }}
+
+      - name: Pin crowdsec version (optional)
+        if: inputs.crowdsec_version != ''
+        env:
+          REQ: ${{ inputs.crowdsec_version }}
+        run: |
+          set -eux
+          sudo mkdir -p /etc/apt/preferences.d
+          printf 'Package: crowdsec\nPin: version %s*\nPin-Priority: 1001\n' "$REQ" \
+            | sudo tee /etc/apt/preferences.d/crowdsec-pin >/dev/null
+          echo "--- /etc/apt/preferences.d/crowdsec-pin ---"
+          cat /etc/apt/preferences.d/crowdsec-pin
 
       - name: Build tarball
         run: |
@@ -49,7 +69,9 @@ jobs:
           sudo -n env bash shell/prepare-crowdsec-minimal.sh
           ls -lh files/etc/crowdsec/lxc-crowdsec.tar.gz
 
-      - name: Collect facts and write MANIFEST
+      - name: Collect facts, verify version, write MANIFEST
+        env:
+          REQ: ${{ inputs.crowdsec_version }}
         run: |
           set -eux
           cd src
@@ -59,26 +81,44 @@ jobs:
           SCRIPT_SHA="$(sha256sum shell/prepare-crowdsec-minimal.sh | awk '{print $1}')"
           SKEL_SHA="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
           NET_CONF="$(grep -vE '^\s*#|^\s*$' rootfs-skel/etc/crowdsec-net.conf | tr '\n' ' ' || true)"
-          # 脚本用 apt-get download 拿 deb（不安装），所以 dpkg-query 查不到；改问 apt 的候选版本
-          CS_VER="$(apt-cache policy crowdsec 2>/dev/null | awk '/Candidate:/{print $2; exit}')"
+          # 实际版本优先取下载下来的 deb 文件名（最硬），退到 apt 候选版本
+          DEB="$(ls /tmp/lxc-crowdsec-minimal/crowdsec_*.deb 2>/dev/null | head -1 || true)"
+          if [ -n "$DEB" ]; then
+            CS_VER="$(basename "$DEB" | sed -E 's/^crowdsec_(.+)_[a-z0-9]+\.deb$/\1/')"
+          else
+            CS_VER="$(apt-cache policy crowdsec 2>/dev/null | awk '/Candidate:/{print $2; exit}')"
+          fi
           case "$CS_VER" in ""|"(none)") CS_VER="unknown" ;; esac
+          echo "实际 crowdsec 版本：$CS_VER（deb=${DEB:-无}）"
+          if [ -n "$REQ" ]; then
+            case "$CS_VER" in
+              "$REQ"|"$REQ"-*|"$REQ"~*|"$REQ"+*)
+                echo "版本校验通过：要求 $REQ，实际 $CS_VER" ;;
+              *)
+                echo "::error::版本校验失败：要求 $REQ，实际 $CS_VER —— pin 未命中，拒绝发布"
+                exit 1 ;;
+            esac
+          else
+            echo "未指定版本，跟随 packagecloud 最新"
+          fi
           BB_URL="$(grep -oE 'https://[^"}[:space:]]*busybox[^"}[:space:]]*' shell/prepare-crowdsec-minimal.sh | head -1 || true)"
           T_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
           T_SIZE="$(stat -c %s "$OUT")"
           T_ENTRIES="$(tar -tzf "$OUT" | wc -l)"
-          # 去掉 tar 里的日期/时间列再做指纹：同一份输入应得到同一个 toc 指纹（tarball sha 会因时间戳变）
           TOC_SHA="$(tar -tzvf "$OUT" | awk '{OFS=" "; $4=""; $5=""; print}' | sort | sha256sum | awk '{print $1}')"
           cat > MANIFEST.json <<EOF
           {
             "schema": 1,
             "source_repo": "xiealon/ImmortalWrt-ImageBuilder",
-            "source_ref": "${{ inputs.source_ref }}",
+            "source_ref": "${{ inputs.source_ref || 'master' }}",
             "source_sha": "$SRC_SHA",
             "source_short": "$SRC_SHORT",
             "prepare_script_sha256": "$SCRIPT_SHA",
             "rootfs_skel_sha256": "$SKEL_SHA",
             "net_conf": "$NET_CONF",
             "crowdsec_version": "$CS_VER",
+            "crowdsec_version_requested": "$REQ",
+            "crowdsec_deb": "$DEB",
             "busybox_url": "$BB_URL",
             "tarball_name": "lxc-crowdsec.tar.gz",
             "tarball_sha256": "$T_SHA",
@@ -91,7 +131,7 @@ jobs:
           }
           EOF
           cat MANIFEST.json
-          echo "::notice::tarball_sha256=$T_SHA toc=$TOC_SHA size=$T_SIZE entries=$T_ENTRIES crowdsec=$CS_VER"
+          echo "::notice::crowdsec=$CS_VER (req=${REQ:-latest}) tarball_sha256=$T_SHA toc=$TOC_SHA entries=$T_ENTRIES"
 
       - name: Publish to Release (exact tag + rolling latest)
         env:
