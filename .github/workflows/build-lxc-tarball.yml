@@ -59,11 +59,15 @@ jobs:
           SCRIPT_SHA="$(sha256sum shell/prepare-crowdsec-minimal.sh | awk '{print $1}')"
           SKEL_SHA="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
           NET_CONF="$(grep -vE '^\s*#|^\s*$' rootfs-skel/etc/crowdsec-net.conf | tr '\n' ' ' || true)"
-          CS_VER="$(dpkg-query -W -f='${Version}' crowdsec 2>/dev/null || echo unknown)"
+          # 脚本用 apt-get download 拿 deb（不安装），所以 dpkg-query 查不到；改问 apt 的候选版本
+          CS_VER="$(apt-cache policy crowdsec 2>/dev/null | awk '/Candidate:/{print $2; exit}')"
+          case "$CS_VER" in ""|"(none)") CS_VER="unknown" ;; esac
           BB_URL="$(grep -oE 'https://[^"}[:space:]]*busybox[^"}[:space:]]*' shell/prepare-crowdsec-minimal.sh | head -1 || true)"
           T_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
           T_SIZE="$(stat -c %s "$OUT")"
           T_ENTRIES="$(tar -tzf "$OUT" | wc -l)"
+          # 去掉 tar 里的日期/时间列再做指纹：同一份输入应得到同一个 toc 指纹（tarball sha 会因时间戳变）
+          TOC_SHA="$(tar -tzvf "$OUT" | awk '{OFS=" "; $4=""; $5=""; print}' | sort | sha256sum | awk '{print $1}')"
           cat > MANIFEST.json <<EOF
           {
             "schema": 1,
@@ -78,6 +82,7 @@ jobs:
             "busybox_url": "$BB_URL",
             "tarball_name": "lxc-crowdsec.tar.gz",
             "tarball_sha256": "$T_SHA",
+            "tarball_toc_sha256": "$TOC_SHA",
             "tarball_size": $T_SIZE,
             "tarball_entries": $T_ENTRIES,
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
@@ -86,7 +91,7 @@ jobs:
           }
           EOF
           cat MANIFEST.json
-          echo "::notice::tarball_sha256=$T_SHA size=$T_SIZE entries=$T_ENTRIES crowdsec=$CS_VER"
+          echo "::notice::tarball_sha256=$T_SHA toc=$TOC_SHA size=$T_SIZE entries=$T_ENTRIES crowdsec=$CS_VER"
 
       - name: Publish to Release (exact tag + rolling latest)
         env:
