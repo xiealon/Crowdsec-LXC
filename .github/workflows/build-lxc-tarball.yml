@@ -60,7 +60,7 @@ jobs:
           SKEL_SHA="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
           NET_CONF="$(grep -vE '^\s*#|^\s*$' rootfs-skel/etc/crowdsec-net.conf | tr '\n' ' ' || true)"
           CS_VER="$(dpkg-query -W -f='${Version}' crowdsec 2>/dev/null || echo unknown)"
-          BB_URL="$(grep -oE 'https://[^"]*busybox[^"]*' shell/prepare-crowdsec-minimal.sh | head -1 || true)"
+          BB_URL="$(grep -oE 'https://[^"}[:space:]]*busybox[^"}[:space:]]*' shell/prepare-crowdsec-minimal.sh | head -1 || true)"
           T_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
           T_SIZE="$(stat -c %s "$OUT")"
           T_ENTRIES="$(tar -tzf "$OUT" | wc -l)"
@@ -91,24 +91,26 @@ jobs:
       - name: Publish to Release (exact tag + rolling latest)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -eux
           cd src
           SRC_SHORT="$(git rev-parse --short=7 HEAD)"
           TAG="lxc-${SRC_SHORT}"
           ASSETS="files/etc/crowdsec/lxc-crowdsec.tar.gz MANIFEST.json"
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          echo "发布到 $GH_REPO，tag=$TAG"
+          if gh release view "$TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
             echo "release $TAG 已存在，覆盖资产"
           else
-            gh release create "$TAG" --title "Crowdsec LXC tarball ($SRC_SHORT)" \
-              --notes "源：xiealon/ImmortalWrt-ImageBuilder@$SRC_SHORT；详细指纹见 MANIFEST.json" 
+            gh release create "$TAG" --repo "$GH_REPO" --title "Crowdsec LXC tarball ($SRC_SHORT)" \
+              --notes "源：xiealon/ImmortalWrt-ImageBuilder@$SRC_SHORT；详细指纹见 MANIFEST.json"
           fi
-          gh release upload "$TAG" $ASSETS --clobber
-          if gh release view lxc-latest >/dev/null 2>&1; then
+          gh release upload "$TAG" $ASSETS --repo "$GH_REPO" --clobber
+          if gh release view lxc-latest --repo "$GH_REPO" >/dev/null 2>&1; then
             echo "lxc-latest 已存在，覆盖资产"
           else
-            gh release create lxc-latest --title "Crowdsec LXC tarball (rolling latest)" \
+            gh release create lxc-latest --repo "$GH_REPO" --title "Crowdsec LXC tarball (rolling latest)" \
               --notes "滚动别名，内容等同最近一次构建的 lxc-<sha>；不要用于可复现构建"
           fi
-          gh release upload lxc-latest $ASSETS --clobber
-          gh release view "$TAG" --json tagName,assets -q '.tagName, (.assets[] | "  \(.name)  \(.size)")'
+          gh release upload lxc-latest $ASSETS --repo "$GH_REPO" --clobber
+          gh release view "$TAG" --repo "$GH_REPO" --json tagName,assets -q '.tagName, (.assets[] | "  \(.name)  \(.size)")'
