@@ -1,0 +1,114 @@
+name: Build Crowdsec LXC Tarball
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "主仓 ref（分支/标签/commit）"
+        required: false
+        default: "master"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lxc-tarball-${{ github.event.inputs.source_ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout definition repo (single source of truth)
+        uses: actions/checkout@v4
+        with:
+          repository: xiealon/ImmortalWrt-ImageBuilder
+          ref: ${{ inputs.source_ref }}
+          path: src
+          fetch-depth: 0
+
+      - name: Show inputs
+        run: |
+          set -eux
+          cd src
+          echo "source_repo=xiealon/ImmortalWrt-ImageBuilder"
+          echo "source_ref=${{ inputs.source_ref }}"
+          echo "source_sha=$(git rev-parse HEAD)"
+          echo "--- rootfs-skel/etc/crowdsec-net.conf ---"
+          cat rootfs-skel/etc/crowdsec-net.conf
+          echo "--- prepare 脚本头 ---"
+          sed -n '1,40p' shell/prepare-crowdsec-minimal.sh
+
+      - name: Build tarball
+        run: |
+          set -eux
+          cd src
+          chmod +x shell/prepare-crowdsec-minimal.sh
+          sudo -n env bash shell/prepare-crowdsec-minimal.sh
+          ls -lh files/etc/crowdsec/lxc-crowdsec.tar.gz
+
+      - name: Collect facts and write MANIFEST
+        run: |
+          set -eux
+          cd src
+          SRC_SHA="$(git rev-parse HEAD)"
+          SRC_SHORT="$(git rev-parse --short=7 HEAD)"
+          OUT="files/etc/crowdsec/lxc-crowdsec.tar.gz"
+          SCRIPT_SHA="$(sha256sum shell/prepare-crowdsec-minimal.sh | awk '{print $1}')"
+          SKEL_SHA="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+          NET_CONF="$(grep -vE '^\s*#|^\s*$' rootfs-skel/etc/crowdsec-net.conf | tr '\n' ' ' || true)"
+          CS_VER="$(dpkg-query -W -f='${Version}' crowdsec 2>/dev/null || echo unknown)"
+          BB_URL="$(grep -oE 'https://[^"]*busybox[^"]*' shell/prepare-crowdsec-minimal.sh | head -1 || true)"
+          T_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
+          T_SIZE="$(stat -c %s "$OUT")"
+          T_ENTRIES="$(tar -tzf "$OUT" | wc -l)"
+          cat > MANIFEST.json <<EOF
+          {
+            "schema": 1,
+            "source_repo": "xiealon/ImmortalWrt-ImageBuilder",
+            "source_ref": "${{ inputs.source_ref }}",
+            "source_sha": "$SRC_SHA",
+            "source_short": "$SRC_SHORT",
+            "prepare_script_sha256": "$SCRIPT_SHA",
+            "rootfs_skel_sha256": "$SKEL_SHA",
+            "net_conf": "$NET_CONF",
+            "crowdsec_version": "$CS_VER",
+            "busybox_url": "$BB_URL",
+            "tarball_name": "lxc-crowdsec.tar.gz",
+            "tarball_sha256": "$T_SHA",
+            "tarball_size": $T_SIZE,
+            "tarball_entries": $T_ENTRIES,
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "runner": "${{ runner.os }}-${{ runner.arch }}",
+            "workflow_run": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          }
+          EOF
+          cat MANIFEST.json
+          echo "::notice::tarball_sha256=$T_SHA size=$T_SIZE entries=$T_ENTRIES crowdsec=$CS_VER"
+
+      - name: Publish to Release (exact tag + rolling latest)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eux
+          cd src
+          SRC_SHORT="$(git rev-parse --short=7 HEAD)"
+          TAG="lxc-${SRC_SHORT}"
+          ASSETS="files/etc/crowdsec/lxc-crowdsec.tar.gz MANIFEST.json"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 已存在，覆盖资产"
+          else
+            gh release create "$TAG" --title "Crowdsec LXC tarball ($SRC_SHORT)" \
+              --notes "源：xiealon/ImmortalWrt-ImageBuilder@$SRC_SHORT；详细指纹见 MANIFEST.json" 
+          fi
+          gh release upload "$TAG" $ASSETS --clobber
+          if gh release view lxc-latest >/dev/null 2>&1; then
+            echo "lxc-latest 已存在，覆盖资产"
+          else
+            gh release create lxc-latest --title "Crowdsec LXC tarball (rolling latest)" \
+              --notes "滚动别名，内容等同最近一次构建的 lxc-<sha>；不要用于可复现构建"
+          fi
+          gh release upload lxc-latest $ASSETS --clobber
+          gh release view "$TAG" --json tagName,assets -q '.tagName, (.assets[] | "  \(.name)  \(.size)")'
