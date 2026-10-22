@@ -13,13 +13,12 @@ on:
     # 保证 lxc-latest 资产不因长期不构建而失效/被删。
     - cron: "17 3 * * 1"
 
-# 【版本锁】CrowdSec 容器镜像版本，唯一真源就是这一行。
-# 必须与主仓 build-x86-64-24.10.x.yml / build-x86-64-25.12.x.yml 里的 CROWDSEC_VERSION 一致，
-# 否则主仓的版本闸门会判定「版本不符」，直接跳过预构建回退本地构建（这是有意的：宁可慢，不可漂）。
-# 升级流程：改这里 → 手动跑本 workflow → 确认 Release 的 MANIFEST 版本正确 → 再改主仓那两行。
-# 空字符串 "" = 跟随 packagecloud 最新（不推荐，会让固件版本随构建时间漂移）。
+# 【CrowdSec 版本】留空 = 每次构建装 packagecloud 当前最新。
+# 主仓 build-x86-64-*.yml 里的同名变量也留空（不比对版本），语义一致：跟随最新。
+# 想钉死某版：这里填 "1.8.1" 这类版本号，主仓那行一起填（否则主仓的版本闸门会跳过预构建）。
+# 实际装到的版本会写进 MANIFEST.json 的 crowdsec_version，主仓构建再把它抄进固件的 Release 说明。
 env:
-  CROWDSEC_VERSION: "1.8.1"
+  CROWDSEC_VERSION: ""
 
 permissions:
   contents: write
