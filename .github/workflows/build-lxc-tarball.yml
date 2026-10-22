@@ -8,15 +8,18 @@ on:
         required: false
         default: "master"
         type: string
-      crowdsec_version:
-        description: "钉住 crowdsec 版本（如 1.8.1，可留空=packagecloud 最新）；填了就会强校验，对不上直接失败"
-        required: false
-        default: ""
-        type: string
-
   schedule:
-    # 每周一 03:17 UTC（北京 11:17）滚一次最新 crowdsec；需要钉版本请手动 dispatch
+    # 每周一 03:17 UTC（北京 11:17）用「同一个写死的版本」重跑一次，
+    # 保证 lxc-latest 资产不因长期不构建而失效/被删。
     - cron: "17 3 * * 1"
+
+# 【版本锁】CrowdSec 容器镜像版本，唯一真源就是这一行。
+# 必须与主仓 build-x86-64-24.10.x.yml / build-x86-64-25.12.x.yml 里的 CROWDSEC_VERSION 一致，
+# 否则主仓的版本闸门会判定「版本不符」，直接跳过预构建回退本地构建（这是有意的：宁可慢，不可漂）。
+# 升级流程：改这里 → 手动跑本 workflow → 确认 Release 的 MANIFEST 版本正确 → 再改主仓那两行。
+# 空字符串 "" = 跟随 packagecloud 最新（不推荐，会让固件版本随构建时间漂移）。
+env:
+  CROWDSEC_VERSION: "1.8.1"
 
 permissions:
   contents: write
@@ -44,20 +47,19 @@ jobs:
           cd src
           echo "source_ref=${{ inputs.source_ref || 'master' }}"
           echo "source_sha=$(git rev-parse HEAD)"
-          echo "crowdsec_version_requested=${CS_VERSION_REQ:-<empty=latest>}"
+          echo "crowdsec_version=${CROWDSEC_VERSION:-<empty=latest>}"
           echo "--- rootfs-skel/etc/crowdsec-net.conf ---"
           cat rootfs-skel/etc/crowdsec-net.conf
-        env:
-          CS_VERSION_REQ: ${{ inputs.crowdsec_version }}
 
-      - name: Pin crowdsec version (optional)
-        if: inputs.crowdsec_version != ''
-        env:
-          REQ: ${{ inputs.crowdsec_version }}
+      - name: Pin crowdsec version
         run: |
-          set -eux
+          set -euo pipefail
+          if [ -z "${CROWDSEC_VERSION:-}" ]; then
+            echo "未锁版本：本次安装 packagecloud 最新 crowdsec"
+            exit 0
+          fi
           sudo mkdir -p /etc/apt/preferences.d
-          printf 'Package: crowdsec\nPin: version %s*\nPin-Priority: 1001\n' "$REQ" \
+          printf 'Package: crowdsec\nPin: version %s*\nPin-Priority: 1001\n' "$CROWDSEC_VERSION" \
             | sudo tee /etc/apt/preferences.d/crowdsec-pin >/dev/null
           echo "--- /etc/apt/preferences.d/crowdsec-pin ---"
           cat /etc/apt/preferences.d/crowdsec-pin
@@ -71,18 +73,16 @@ jobs:
           ls -lh files/etc/crowdsec/lxc-crowdsec.tar.gz
 
       - name: Collect facts, verify version, write MANIFEST
-        env:
-          REQ: ${{ inputs.crowdsec_version }}
         run: |
           set -eux
           cd src
+          REQ="${CROWDSEC_VERSION:-}"
           SRC_SHA="$(git rev-parse HEAD)"
           SRC_SHORT="$(git rev-parse --short=7 HEAD)"
           OUT="files/etc/crowdsec/lxc-crowdsec.tar.gz"
           SCRIPT_SHA="$(sha256sum shell/prepare-crowdsec-minimal.sh | awk '{print $1}')"
           SKEL_SHA="$(find rootfs-skel -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
           NET_CONF="$(grep -vE '^\s*#|^\s*$' rootfs-skel/etc/crowdsec-net.conf | tr '\n' ' ' || true)"
-          # 实际版本优先取下载下来的 deb 文件名（最硬），退到 apt 候选版本
           DEB="$(ls /tmp/lxc-crowdsec-minimal/crowdsec_*.deb 2>/dev/null | head -1 || true)"
           if [ -n "$DEB" ]; then
             CS_VER="$(basename "$DEB" | sed -E 's/^crowdsec_(.+)_[a-z0-9]+\.deb$/\1/')"
@@ -100,7 +100,7 @@ jobs:
                 exit 1 ;;
             esac
           else
-            echo "未指定版本，跟随 packagecloud 最新"
+            echo "未锁版本，跟随 packagecloud 最新"
           fi
           BB_URL="$(grep -oE 'https://[^"}[:space:]]*busybox[^"}[:space:]]*' shell/prepare-crowdsec-minimal.sh | head -1 || true)"
           T_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
@@ -132,7 +132,7 @@ jobs:
           }
           EOF
           cat MANIFEST.json
-          echo "::notice::crowdsec=$CS_VER (req=${REQ:-latest}) tarball_sha256=$T_SHA toc=$TOC_SHA entries=$T_ENTRIES"
+          echo "::notice::crowdsec=$CS_VER (lock=${REQ:-latest}) tarball_sha256=$T_SHA toc=$TOC_SHA entries=$T_ENTRIES"
 
       - name: Publish to Release (exact tag + rolling latest)
         env:
@@ -149,14 +149,14 @@ jobs:
             echo "release $TAG 已存在，覆盖资产"
           else
             gh release create "$TAG" --repo "$GH_REPO" --title "Crowdsec LXC tarball ($SRC_SHORT)" \
-              --notes "源：xiealon/ImmortalWrt-ImageBuilder@$SRC_SHORT；详细指纹见 MANIFEST.json"
+              --notes "源：xiealon/ImmortalWrt-ImageBuilder@$SRC_SHORT；crowdsec ${CROWDSEC_VERSION:-latest}；详细指纹见 MANIFEST.json"
           fi
           gh release upload "$TAG" $ASSETS --repo "$GH_REPO" --clobber
           if gh release view lxc-latest --repo "$GH_REPO" >/dev/null 2>&1; then
             echo "lxc-latest 已存在，覆盖资产"
           else
             gh release create lxc-latest --repo "$GH_REPO" --title "Crowdsec LXC tarball (rolling latest)" \
-              --notes "滚动别名，内容等同最近一次构建的 lxc-<sha>；不要用于可复现构建"
+              --notes "滚动别名，内容等同最近一次构建的 lxc-<sha>；版本由构建时 CROWDSEC_VERSION 决定"
           fi
           gh release upload lxc-latest $ASSETS --repo "$GH_REPO" --clobber
           gh release view "$TAG" --repo "$GH_REPO" --json tagName,assets -q '.tagName, (.assets[] | "  \(.name)  \(.size)")'
