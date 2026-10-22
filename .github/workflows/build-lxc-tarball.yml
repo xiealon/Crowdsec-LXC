@@ -13,9 +13,6 @@ on:
         required: false
         default: ""
         type: string
-  schedule:
-    # 每周一 03:17 UTC（北京 11:17）自动滚一次最新版；钉版本请手动 dispatch
-    - cron: "17 3 * * 1"
 
 permissions:
   contents: write
