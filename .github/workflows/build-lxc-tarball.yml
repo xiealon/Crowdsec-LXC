@@ -8,11 +8,6 @@ on:
         required: false
         default: "master"
         type: string
-  schedule:
-    # 每周一 03:17 UTC（北京 11:17）用「同一个写死的版本」重跑一次，
-    # 保证 lxc-latest 资产不因长期不构建而失效/被删。
-    - cron: "17 3 * * 1"
-
 # 【CrowdSec 版本】留空 = 每次构建装 packagecloud 当前最新。
 # 主仓 build-x86-64-*.yml 里的同名变量也留空（不比对版本），语义一致：跟随最新。
 # 想钉死某版：这里填 "1.8.1" 这类版本号，主仓那行一起填（否则主仓的版本闸门会跳过预构建）。
